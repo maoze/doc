@@ -1,0 +1,135 @@
+
+
+build_binary_native_image:
+	docker build -t docker-cli-native$(IMAGE_TAG) -f ./dockerfiles/Dockerfile.binary-native .
+
+binary: build_binary_native_image
+	docker run --rm -e VERSION=$(VERSION) -e GITCOMMIT -e PLATFORM -v "$(CURDIR)":/go/src/github.com/docker/cli docker-cli-native$(IMAGE_TAG)
+
+build: binary
+
+######################### In components/cli/docker.Makefile
+
+
+bundles:
+	mkdir bundles
+
+init-go-pkg-cache:
+	$(if $(PKGCACHE_DIR), mkdir -p $(shell echo $(PKGCACHE_MAP) | sed -E 's@([^: ]*):[^ ]*@$(PKGCACHE_DIR)/\1@g'))
+
+build: bundles init-go-pkg-cache
+	docker build ${BUILD_APT_MIRROR} ${DOCKER_BUILD_ARGS} -t "$(DOCKER_IMAGE)" -f "$(DOCKERFILE)" .  ### build image
+
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+images build process
+
+1)build criu
+2)build registry
+3)checkout docker-py
+4)build go-swagger
+5)download frozen images
+6)install runtime-dev
+7)install tomlv from hack/dockerfile/install/$INSTALL_BINARY_NAME.installer
+8)install vndr from hack/dockerfile/install/$INSTALL_BINARY_NAME.installer
+9)install containerd from hack/dockerfile/install/$INSTALL_BINARY_NAME.installer
+10)install proxy from hack/dockerfile/install/$INSTALL_BINARY_NAME.installer
+11)install gometalinter from hack/dockerfile/install/$INSTALL_BINARY_NAME.installer
+12)install dockercli from hack/dockerfile/install/$INSTALL_BINARY_NAME.installer
+13)install runc from hack/dockerfile/install/$INSTALL_BINARY_NAME.installer
+14)install tini from hack/dockerfile/install/$INSTALL_BINARY_NAME.installer
+15)prepare environment and copy the 13 already build binary
+16)copy the engine dir to /go/src/github.com/docker/docker
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+
+binary:	build
+	docker run --rm -i --privileged $(DOCKER_CONTAINER_NAME) -e DOCKER_CROSSPLATFORMS \
+    -e BUILD_APT_MIRROR \
+    -e BUILDFLAGS \
+    -e KEEPBUNDLE \
+    -e DOCKER_BUILD_ARGS \
+    -e DOCKER_BUILD_GOGC \
+    -e DOCKER_BUILD_PKGS \
+    -e DOCKER_BUILDKIT \
+    -e DOCKER_BASH_COMPLETION_PATH \
+    -e DOCKER_CLI_PATH \
+    -e DOCKER_DEBUG \
+    -e DOCKER_EXPERIMENTAL \
+    -e DOCKER_GITCOMMIT \
+    -e DOCKER_GRAPHDRIVER \
+    -e DOCKER_INCREMENTAL_BINARY \
+    -e DOCKER_LDFLAGS \
+    -e DOCKER_PORT \
+    -e DOCKER_REMAP_ROOT \
+    -e DOCKER_STORAGE_OPTS \
+    -e DOCKER_USERLANDPROXY \
+    -e DOCKERD_ARGS \
+    -e TEST_INTEGRATION_DIR \
+    -e TESTDIRS \
+    -e TESTFLAGS \
+    -e TIMEOUT \
+    -e HTTP_PROXY \
+    -e HTTPS_PROXY \
+    -e NO_PROXY \
+    -e http_proxy \
+    -e https_proxy \
+    -e no_proxy \
+    -e VERSION \
+    -e PLATFORM \
+    -e PRODUCT -v "$(CURDIR)/bundles:/go/src/github.com/docker/docker/bundles" $(DOCKER_PORT_FORWARD) hack/make.sh binary
+
+######################### In components/engine/Makefile
+
+
+In container		
+		bundle() {
+		    local bundle="$1"; shift
+		    echo "---> Making bundle: $(basename "$bundle") (in $DEST)"
+		    source "$SCRIPTDIR/make/$bundle" "$@"
+		}
+		
+		
+		for bundle in ${bundles[@]}; do
+			export DEST="bundles/$(basename "$bundle")"
+			mkdir -p "$DEST"
+		    ABS_DEST="$(cd "$DEST" && pwd -P)"
+		    bundle "$bundle"
+		    echo
+		done
+		
+		hack/make/binary -> hack/make/binary-daemon -> hack/make/.binary
+		
+		.binary          build the docker-daemon
+		binary-daemon    copy dockerd docker-containerd docker-containerd-shim docker-containerd-ctr docker-runc docker-init docker-proxy
+		binary			 set environment
+		
+		
+		######################### In components/engine/hack/make.sh (in container)
+
+static-cli:
+	$(MAKE) -C components/cli -f docker.Makefile VERSION=$(VERSION) build 
+
+static-engine:
+	$(MAKE) -C components/engine VERSION=$(VERSION) binary
+
+static-linux: static-cli static-engine 
+	mkdir -p build/linux/docker
+	cp components/cli/build/docker build/linux/docker/
+	for f in dockerd docker-containerd docker-containerd-ctr docker-containerd-shim docker-init docker-proxy docker-runc; do \
+		cp -L components/engine/bundles/binary-daemon/$$f build/linux/docker/$$f; \
+	done
+	tar -C build/linux -c -z -f build/linux/docker-$(STATIC_VERSION).tgz docker
+
+######################### In components/packaging/static/Makefile
+
+static:
+	for p in static-linux cross-mac cross-win cross-arm; do
+		make -C components/packaging/static VERSION=$(VERSION) ENGINE_DIR=components/engine CLI_DIR=components/cli GO_VERSION=$(GO_VERSION) $${p};
+	done
+
+######################### In components/packaging/Makefile
+
+make static
+	$(MAKE) VERSION=$(VERSION) CLI_DIR=components/cli ENGINE_DIR=components/engine -C components/packaging static
+
+######################### In Makefile
